@@ -1,0 +1,30 @@
+# Binaries
+main
+
+# Direktori build
+/build/
+
+# File database SQLite
+*.db
+
+# File log
+*.log
+
+# Direktori vendor
+/vendor/
+
+# File konfigurasi lingkungan
+.env
+
+# Direktori cache
+/cache/
+
+# File yang dihasilkan oleh editor atau IDE
+*.swp
+*.swo
+*.idea/
+*.vscode/
+.DS_Store
+
+# Direktori yang dihasilkan oleh Go
+/bin/
