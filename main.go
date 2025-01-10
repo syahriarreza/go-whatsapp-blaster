@@ -1,18 +1,19 @@
 package main
 
 import (
+	"context"
 	"embed"
+	"fmt"
 	"html/template"
 	"log"
 	"net/http"
 	"strings"
 	"sync"
 
-	"context"
-
-	"github.com/gin-gonic/gin"
 	"github.com/jmoiron/sqlx"
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/labstack/echo/v4"
+	_ "github.com/lib/pq" // Import driver PostgreSQL
+	"github.com/spf13/viper"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -30,16 +31,51 @@ var clientMap = make(map[string]*whatsmeow.Client)
 var clientLock sync.Mutex
 
 func init() {
-	// Setup SQLite Database
-	var err error
-	db, err = sqlx.Connect("sqlite3", "multi_tenant.db")
+	// Setup Viper untuk membaca konfigurasi
+	viper.SetConfigName("app")
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(".")
+	if err := viper.ReadInConfig(); err != nil {
+		log.Fatalf("Error reading config file: %v", err)
+	}
+
+	// Koneksi awal ke PostgreSQL tanpa menentukan nama database
+	connStr := fmt.Sprintf("user=%s password=%s sslmode=%s dbname=postgres",
+		viper.GetString("database.username"),
+		viper.GetString("database.password"),
+		viper.GetString("database.sslmode"))
+
+	db, err := sqlx.Connect("postgres", connStr)
+	if err != nil {
+		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
+	}
+
+	// Buat database jika belum ada
+	dbname := viper.GetString("database.dbname")
+	_, err = db.Exec(fmt.Sprintf("CREATE DATABASE \"%s\"", dbname))
+	if err != nil && !strings.Contains(err.Error(), "already exists") {
+		log.Fatalf("Failed to create database: %v", err)
+	}
+
+	// Tutup koneksi awal
+	db.Close()
+
+	// Koneksi ke database yang baru dibuat
+	connStr = fmt.Sprintf("user=%s password=%s dbname=%s sslmode=%s",
+		viper.GetString("database.username"),
+		viper.GetString("database.password"),
+		dbname,
+		viper.GetString("database.sslmode"))
+
+	db, err = sqlx.Connect("postgres", connStr)
 	if err != nil {
 		log.Fatalf("Failed to connect to DB: %v", err)
 	}
 
+	// Buat tabel users jika belum ada
 	schema := `
 	CREATE TABLE IF NOT EXISTS users (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		id SERIAL PRIMARY KEY,
 		username TEXT UNIQUE NOT NULL,
 		password TEXT NOT NULL
 	);
@@ -48,65 +84,82 @@ func init() {
 }
 
 func main() {
-	r := gin.Default()
-
+	// Inisialisasi template engine menggunakan html/template
 	tmpl := template.Must(template.New("").ParseFS(templates, "templates/*"))
-	r.GET("/", func(c *gin.Context) {
-		tmpl.ExecuteTemplate(c.Writer, "index.html", nil)
+
+	e := echo.New()
+
+	e.GET("/", func(c echo.Context) error {
+		// Gunakan buffer untuk menulis output template
+		var buf strings.Builder
+		if err := tmpl.ExecuteTemplate(&buf, "index.html", nil); err != nil {
+			return c.String(http.StatusInternalServerError, err.Error())
+		}
+		return c.HTML(http.StatusOK, buf.String())
 	})
 
-	r.POST("/register", RegisterUser)
-	r.POST("/login", LoginUser)
+	e.POST("/register", RegisterUser)
+	e.POST("/login", LoginUser)
 
-	r.GET("/wa/login/:username", WhatsAppLogin)
-	r.POST("/wa/blast/:username", SendBlastMessage)
+	e.GET("/wa/login/:username", WhatsAppLogin)
+	e.POST("/wa/blast/:username", SendBlastMessage)
 
-	r.Run(":3000")
+	log.Fatal(e.Start(":3000"))
 }
 
+// HashPassword hashes the given password using bcrypt
 func HashPassword(password string) (string, error) {
 	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	return string(bytes), err
 }
 
-func RegisterUser(c *gin.Context) {
-	username := c.PostForm("username")
-	password := c.PostForm("password")
+func RegisterUser(c echo.Context) error {
+	username := c.FormValue("username")
+	password := c.FormValue("password")
+
+	fmt.Println("Received username:", username)
+	fmt.Println("Received password:", password)
 
 	hashedPassword, _ := HashPassword(password)
-	_, err := db.Exec("INSERT INTO users (username, password) VALUES (?, ?)", username, hashedPassword)
+	fmt.Println("Hashed password:", hashedPassword)
+
+	_, err := db.Exec("INSERT INTO users (username, password) VALUES ($1, $2)", username, hashedPassword)
 	if err != nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "Username already exists"})
-		return
+		return c.JSON(http.StatusConflict, echo.Map{"error": "Username already exists"})
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "User registered successfully"})
+	return c.JSON(http.StatusOK, echo.Map{"message": "User registered successfully"})
 }
 
-func LoginUser(c *gin.Context) {
-	username := c.PostForm("username")
-	password := c.PostForm("password")
+func LoginUser(c echo.Context) error {
+	username := c.FormValue("username")
+	password := c.FormValue("password")
 
 	var hashedPassword string
-	err := db.Get(&hashedPassword, "SELECT password FROM users WHERE username = ?", username)
+	err := db.Get(&hashedPassword, "SELECT password FROM users WHERE username = $1", username)
 	if err != nil || bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(password)) != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
-		return
+		return c.JSON(http.StatusUnauthorized, echo.Map{"error": "Invalid credentials"})
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Login successful"})
+	return c.JSON(http.StatusOK, echo.Map{"message": "Login successful"})
 }
 
-func WhatsAppLogin(c *gin.Context) {
+func WhatsAppLogin(c echo.Context) error {
 	username := c.Param("username")
 	clientLock.Lock()
 	defer clientLock.Unlock()
 
 	dbLog := waLog.Stdout("Database", "DEBUG", true)
-	container, err := sqlstore.New("sqlite", "file:"+username+"_session.db?_foreign_keys=on", dbLog)
+
+	// Gunakan PostgreSQL sebagai database untuk menyimpan sesi
+	connStr := fmt.Sprintf("user=%s password=%s dbname=%s sslmode=%s",
+		viper.GetString("database.username"),
+		viper.GetString("database.password"),
+		"wa-blaster-session",
+		viper.GetString("database.sslmode"))
+	container, err := sqlstore.New("postgres", connStr, dbLog)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create session store"})
-		return
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to create session store"})
 	}
 
 	device, _ := container.GetFirstDevice()
@@ -118,37 +171,34 @@ func WhatsAppLogin(c *gin.Context) {
 
 	for evt := range qrChan {
 		if evt.Event == "code" {
-			c.JSON(http.StatusOK, gin.H{"qr": evt.Code})
-			return
+			return c.JSON(http.StatusOK, echo.Map{"qr": evt.Code})
 		}
 	}
+	return nil
 }
 
-func SendBlastMessage(c *gin.Context) {
+func SendBlastMessage(c echo.Context) error {
 	username := c.Param("username")
 	clientLock.Lock()
 	client, exists := clientMap[username]
 	clientLock.Unlock()
 
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "WhatsApp not logged in"})
-		return
+		return c.JSON(http.StatusUnauthorized, echo.Map{"error": "WhatsApp not logged in"})
 	}
 
-	numbers := strings.Split(c.PostForm("numbers"), ",")
-	message := c.PostForm("message")
+	numbers := strings.Split(c.FormValue("numbers"), ",")
+	message := c.FormValue("message")
 
 	for _, number := range numbers {
 		toJID, e := types.ParseJID(number)
 		if e != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": e.Error()})
-			return
+			return c.JSON(http.StatusUnauthorized, echo.Map{"error": e.Error()})
 		}
-		// client.SendMessage(context.TODO(), types.BroadcastServerJID, number+"@s.whatsapp.net", message)
 		client.SendMessage(context.TODO(), toJID, &waE2E.Message{
 			Conversation: proto.String(message),
 		})
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Messages sent"})
+	return c.JSON(http.StatusOK, echo.Map{"message": "Messages sent"})
 }

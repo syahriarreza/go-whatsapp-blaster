@@ -2,5 +2,9 @@
 server:
   port: 3000
 database:
-  driver: sqlite3
-  source: multi_tenant.db
+  driver: postgres
+  username: "postgres"
+  password: "postgres"
+  dbname: "wa-blaster"
+  sslmode: "disable"
+
