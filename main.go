@@ -45,7 +45,9 @@ func init() {
 		viper.GetString("database.password"),
 		viper.GetString("database.sslmode"))
 
-	db, err := sqlx.Connect("postgres", connStr)
+	var err error // Tambahkan ini di luar fungsi init jika diperlukan
+
+	db, err = sqlx.Connect("postgres", connStr)
 	if err != nil {
 		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
 	}
@@ -122,6 +124,8 @@ func RegisterUser(c echo.Context) error {
 
 	hashedPassword, _ := HashPassword(password)
 	fmt.Println("Hashed password:", hashedPassword)
+
+	fmt.Println("DB:", db)
 
 	_, err := db.Exec("INSERT INTO users (username, password) VALUES ($1, $2)", username, hashedPassword)
 	if err != nil {
