@@ -6,5 +6,6 @@ database:
   username: "postgres"
   password: "postgres"
   dbname: "wa-blaster"
+  wa_dbname: "wa-blaster-session"
   sslmode: "disable"
 

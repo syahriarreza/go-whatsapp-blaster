@@ -52,9 +52,14 @@ func init() {
 		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
 	}
 
-	// Buat database jika belum ada
-	dbname := viper.GetString("database.dbname")
-	_, err = db.Exec(fmt.Sprintf("CREATE DATABASE \"%s\"", dbname))
+	// Buat database app
+	_, err = db.Exec(fmt.Sprintf("CREATE DATABASE \"%s\"", viper.GetString("database.dbname")))
+	if err != nil && !strings.Contains(err.Error(), "already exists") {
+		log.Fatalf("Failed to create database: %v", err)
+	}
+
+	// Buat database wa log
+	_, err = db.Exec(fmt.Sprintf("CREATE DATABASE \"%s\"", viper.GetString("database.wa_dbname")))
 	if err != nil && !strings.Contains(err.Error(), "already exists") {
 		log.Fatalf("Failed to create database: %v", err)
 	}
@@ -66,7 +71,7 @@ func init() {
 	connStr = fmt.Sprintf("user=%s password=%s dbname=%s sslmode=%s",
 		viper.GetString("database.username"),
 		viper.GetString("database.password"),
-		dbname,
+		viper.GetString("database.dbname"),
 		viper.GetString("database.sslmode"))
 
 	db, err = sqlx.Connect("postgres", connStr)
@@ -118,14 +123,7 @@ func HashPassword(password string) (string, error) {
 func RegisterUser(c echo.Context) error {
 	username := c.FormValue("username")
 	password := c.FormValue("password")
-
-	fmt.Println("Received username:", username)
-	fmt.Println("Received password:", password)
-
 	hashedPassword, _ := HashPassword(password)
-	fmt.Println("Hashed password:", hashedPassword)
-
-	fmt.Println("DB:", db)
 
 	_, err := db.Exec("INSERT INTO users (username, password) VALUES ($1, $2)", username, hashedPassword)
 	if err != nil {
@@ -148,39 +146,50 @@ func LoginUser(c echo.Context) error {
 	return c.JSON(http.StatusOK, echo.Map{"message": "Login successful"})
 }
 
+// WhatsAppLogin handles the WhatsApp login process for a given username
 func WhatsAppLogin(c echo.Context) error {
 	username := c.Param("username")
 	clientLock.Lock()
 	defer clientLock.Unlock()
 
+	// Check if client already exists
+	if cli, exists := clientMap[username]; exists && cli != nil {
+		return c.JSON(http.StatusConflict, echo.Map{"error": "Client already exists"})
+	}
+
 	dbLog := waLog.Stdout("Database", "DEBUG", true)
 
-	// Gunakan PostgreSQL sebagai database untuk menyimpan sesi
 	connStr := fmt.Sprintf("user=%s password=%s dbname=%s sslmode=%s",
 		viper.GetString("database.username"),
 		viper.GetString("database.password"),
-		"wa-blaster-session",
+		viper.GetString("database.wa_dbname"),
 		viper.GetString("database.sslmode"))
 	container, err := sqlstore.New("postgres", connStr, dbLog)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to create session store"})
 	}
 
-	device, _ := container.GetFirstDevice()
+	device, err := container.GetFirstDevice()
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to get device"})
+	}
+
 	client := whatsmeow.NewClient(device, dbLog)
 	clientMap[username] = client
 
-	qrChan, _ := client.GetQRChannel(nil)
+	qrChan, _ := client.GetQRChannel(context.Background())
 	client.Connect()
 
 	for evt := range qrChan {
 		if evt.Event == "code" {
-			return c.JSON(http.StatusOK, echo.Map{"qr": evt.Code})
+			code := evt.Code
+			// qrterminal.GenerateHalfBlock(code, qrterminal.L, os.Stdout) // display on terminal
+			return c.JSON(http.StatusOK, echo.Map{"qr": code})
 		}
 	}
+
 	return nil
 }
-
 func SendBlastMessage(c echo.Context) error {
 	username := c.Param("username")
 	clientLock.Lock()

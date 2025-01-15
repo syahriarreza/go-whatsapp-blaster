@@ -8,6 +8,7 @@ require (
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/labstack/echo/v4 v4.13.3
 	github.com/lib/pq v1.10.9
+	github.com/mdp/qrterminal v1.0.1
 	github.com/spf13/viper v1.19.0
 	go.mau.fi/whatsmeow v0.0.0-20250104105216-918c879fcd19
 	golang.org/x/crypto v0.32.0
@@ -46,4 +47,5 @@ require (
 	golang.org/x/text v0.21.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+	rsc.io/qr v0.2.0 // indirect
 )
