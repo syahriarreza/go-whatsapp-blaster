@@ -14,10 +14,13 @@
                 params.append(pair[0], pair[1]);
             }
 
+            const jwtToken = localStorage.getItem('jwtToken');
+
             fetch(action, {
                 method: method,
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
+                    'Authorization': `Bearer ${jwtToken}`
                 },
                 body: method === 'POST' ? params.toString() : undefined,
             })
@@ -36,14 +39,47 @@
             });
         }
 
+        function handleLogin(event) {
+            event.preventDefault();
+
+            const formData = new FormData(event.target);
+            const params = new URLSearchParams();
+
+            for (const pair of formData.entries()) {
+                params.append(pair[0], pair[1]);
+            }
+
+            fetch('/login', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: params.toString(),
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else if (data.token) {
+                    localStorage.setItem('jwtToken', data.token);
+                    alert('Login successful');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });
+        }
+
         function handleWhatsAppLogin(event) {
             event.preventDefault();
 
-            const username = event.target.querySelector('input[name="username"]').value;
-            const action = `/wa/login/${encodeURIComponent(username)}`;
+            const jwtToken = localStorage.getItem('jwtToken');
 
-            fetch(action, {
+            fetch('/wa/login', {
                 method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${jwtToken}`
+                }
             })
             .then(response => response.json())
             .then(data => {
@@ -74,7 +110,7 @@
     </form>
 
     <h1>Login</h1>
-    <form onsubmit="handleFormSubmit(event, '/login')">
+    <form onsubmit="handleLogin(event)">
         Username: <input type="text" name="username" /><br>
         Password: <input type="password" name="password" /><br>
         <button type="submit">Login</button>
@@ -82,7 +118,6 @@
 
     <h1>WhatsApp Login</h1>
     <form onsubmit="handleWhatsAppLogin(event)">
-        Username: <input type="text" name="username" /><br>
         <button type="submit">Login with WhatsApp</button>
     </form>
     <div id="qr-container"></div>

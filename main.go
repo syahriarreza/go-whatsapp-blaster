@@ -9,10 +9,13 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/golang-jwt/jwt/v4"
 	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v4"
 	_ "github.com/lib/pq" // Import driver PostgreSQL
+	"github.com/sebarcode/codekit"
 	"github.com/spf13/viper"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -29,6 +32,13 @@ var templates embed.FS
 var db *sqlx.DB
 var clientMap = make(map[string]*whatsmeow.Client)
 var clientLock sync.Mutex
+
+var jwtKey = []byte("your_secret_key")
+
+type Claims struct {
+	Username string `json:"username"`
+	jwt.RegisteredClaims
+}
 
 func init() {
 	// Setup Viper untuk membaca konfigurasi
@@ -108,8 +118,9 @@ func main() {
 	e.POST("/register", RegisterUser)
 	e.POST("/login", LoginUser)
 
-	e.GET("/wa/login/:username", WhatsAppLogin)
-	e.POST("/wa/blast/:username", SendBlastMessage)
+	// Pasang middleware jwtMiddleware pada rute yang memerlukan autentikasi
+	e.GET("/wa/login", WhatsAppLogin, jwtMiddleware)
+	e.POST("/wa/blast/:username", SendBlastMessage, jwtMiddleware)
 
 	log.Fatal(e.Start(":3000"))
 }
@@ -120,6 +131,7 @@ func HashPassword(password string) (string, error) {
 	return string(bytes), err
 }
 
+// RegisterUser handles user registration
 func RegisterUser(c echo.Context) error {
 	username := c.FormValue("username")
 	password := c.FormValue("password")
@@ -133,6 +145,7 @@ func RegisterUser(c echo.Context) error {
 	return c.JSON(http.StatusOK, echo.Map{"message": "User registered successfully"})
 }
 
+// LoginUser handles user login and generates a JWT token
 func LoginUser(c echo.Context) error {
 	username := c.FormValue("username")
 	password := c.FormValue("password")
@@ -143,18 +156,34 @@ func LoginUser(c echo.Context) error {
 		return c.JSON(http.StatusUnauthorized, echo.Map{"error": "Invalid credentials"})
 	}
 
-	return c.JSON(http.StatusOK, echo.Map{"message": "Login successful"})
+	expirationTime := time.Now().Add(5 * time.Minute)
+	claims := &Claims{
+		Username: username,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expirationTime),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString(jwtKey)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Could not generate token"})
+	}
+
+	return c.JSON(http.StatusOK, echo.Map{"token": tokenString})
 }
 
 // WhatsAppLogin handles the WhatsApp login process for a given username
 func WhatsAppLogin(c echo.Context) error {
-	username := c.Param("username")
 	clientLock.Lock()
 	defer clientLock.Unlock()
 
+	// Ambil username dari context
+	username := c.Get("username").(string)
+
 	// Check if client already exists
 	if cli, exists := clientMap[username]; exists && cli != nil {
-		return c.JSON(http.StatusConflict, echo.Map{"error": "Client already exists"})
+		return c.JSON(http.StatusConflict, echo.Map{"error": "No Need to Login, Client already exists"})
 	}
 
 	dbLog := waLog.Stdout("Database", "DEBUG", true)
@@ -190,8 +219,11 @@ func WhatsAppLogin(c echo.Context) error {
 
 	return nil
 }
+
+// SendBlastMessage sends a message to multiple WhatsApp numbers
 func SendBlastMessage(c echo.Context) error {
-	username := c.Param("username")
+	username := c.Get("username").(string)
+
 	clientLock.Lock()
 	client, exists := clientMap[username]
 	clientLock.Unlock()
@@ -208,10 +240,39 @@ func SendBlastMessage(c echo.Context) error {
 		if e != nil {
 			return c.JSON(http.StatusUnauthorized, echo.Map{"error": e.Error()})
 		}
-		client.SendMessage(context.TODO(), toJID, &waE2E.Message{
+		resp, e := client.SendMessage(context.TODO(), toJID, &waE2E.Message{
 			Conversation: proto.String(message),
 		})
+		if e != nil {
+			return c.JSON(http.StatusInternalServerError, echo.Map{"error": e.Error()})
+		}
+		fmt.Println("WA SengMessage:", codekit.JsonStringIndent(resp, "\t"))
 	}
 
 	return c.JSON(http.StatusOK, echo.Map{"message": "Messages sent"})
+}
+
+func jwtMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		authHeader := c.Request().Header.Get("Authorization")
+		if authHeader == "" {
+			return c.JSON(http.StatusUnauthorized, echo.Map{"error": "Missing token"})
+		}
+
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+		claims := &Claims{}
+
+		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+			return jwtKey, nil
+		})
+
+		if err != nil || !token.Valid {
+			return c.JSON(http.StatusUnauthorized, echo.Map{"error": "Invalid token"})
+		}
+
+		// Set username in context
+		c.Set("username", claims.Username)
+
+		return next(c)
+	}
 }
