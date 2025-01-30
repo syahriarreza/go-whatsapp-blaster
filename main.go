@@ -17,6 +17,7 @@ import (
 	_ "github.com/lib/pq" // Import driver PostgreSQL
 	"github.com/sebarcode/codekit"
 	"github.com/spf13/viper"
+	"github.com/syahriarreza/go-whatsapp-blaster/models"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -24,14 +25,19 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/doug-martin/goqu/v9"
+	_ "github.com/doug-martin/goqu/v9/dialect/postgres" // Import dialect postgres
 )
 
 //go:embed templates/*
 var templates embed.FS
 
 var db *sqlx.DB
+var dbWA *sqlx.DB
 var clientMap = make(map[string]*whatsmeow.Client)
 var clientLock sync.Mutex
+var connStringWA string
 
 var jwtKey = []byte("your_secret_key")
 
@@ -49,13 +55,13 @@ func init() {
 		log.Fatalf("Error reading config file: %v", err)
 	}
 
+	var err error
+
 	// Koneksi awal ke PostgreSQL tanpa menentukan nama database
 	connStr := fmt.Sprintf("user=%s password=%s sslmode=%s dbname=postgres",
 		viper.GetString("database.username"),
 		viper.GetString("database.password"),
 		viper.GetString("database.sslmode"))
-
-	var err error // Tambahkan ini di luar fungsi init jika diperlukan
 
 	db, err = sqlx.Connect("postgres", connStr)
 	if err != nil {
@@ -98,6 +104,18 @@ func init() {
 	);
 	`
 	db.MustExec(schema)
+
+	// db conn for wa
+	connStringWA = fmt.Sprintf("user=%s password=%s dbname=%s sslmode=%s",
+		viper.GetString("database.username"),
+		viper.GetString("database.password"),
+		viper.GetString("database.wa_dbname"),
+		viper.GetString("database.sslmode"))
+
+	dbWA, err = sqlx.Connect("postgres", connStringWA)
+	if err != nil {
+		log.Fatalf("Failed to connect to DB: %v", err)
+	}
 }
 
 func main() {
@@ -118,9 +136,13 @@ func main() {
 	e.POST("/register", RegisterUser)
 	e.POST("/login", LoginUser)
 
-	// Pasang middleware jwtMiddleware pada rute yang memerlukan autentikasi
 	e.GET("/wa/login", WhatsAppLogin, jwtMiddleware)
+	e.POST("/wa/logout", WhatsAppLogout, jwtMiddleware)
+	e.GET("/wa/check", CheckWhatsAppID, jwtMiddleware)
 	e.POST("/wa/blast/:username", SendBlastMessage, jwtMiddleware)
+
+	// Tambahkan defer untuk memanggil exitHandler ketika aplikasi mati
+	defer exitHandler()
 
 	log.Fatal(e.Start(":3000"))
 }
@@ -137,7 +159,18 @@ func RegisterUser(c echo.Context) error {
 	password := c.FormValue("password")
 	hashedPassword, _ := HashPassword(password)
 
-	_, err := db.Exec("INSERT INTO users (username, password) VALUES ($1, $2)", username, hashedPassword)
+	// TODO: check username tidak boleh sama
+
+	sql, args, err := goqu.Insert("users").
+		Rows(
+			models.User{Username: username, Password: hashedPassword},
+		).
+		ToSQL()
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to build SQL query"})
+	}
+
+	_, err = db.Exec(sql, args...)
 	if err != nil {
 		return c.JSON(http.StatusConflict, echo.Map{"error": "Username already exists"})
 	}
@@ -151,7 +184,15 @@ func LoginUser(c echo.Context) error {
 	password := c.FormValue("password")
 
 	var hashedPassword string
-	err := db.Get(&hashedPassword, "SELECT password FROM users WHERE username = $1", username)
+	sql, args, err := goqu.From("users").
+		Select("password").
+		Where(goqu.Ex{"username": username}).
+		ToSQL()
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to build SQL query"})
+	}
+
+	err = db.Get(&hashedPassword, sql, args...)
 	if err != nil || bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(password)) != nil {
 		return c.JSON(http.StatusUnauthorized, echo.Map{"error": "Invalid credentials"})
 	}
@@ -186,14 +227,37 @@ func WhatsAppLogin(c echo.Context) error {
 		return c.JSON(http.StatusConflict, echo.Map{"error": "No Need to Login, Client already exists"})
 	}
 
-	dbLog := waLog.Stdout("Database", "DEBUG", true)
+	// Get whatsapp_id from users table based on username
+	var whatsappID string
+	sql, args, err := goqu.From("users").
+		Select("whatsapp_id").
+		Where(goqu.Ex{"username": username}).
+		ToSQL()
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to build SQL query"})
+	}
 
-	connStr := fmt.Sprintf("user=%s password=%s dbname=%s sslmode=%s",
-		viper.GetString("database.username"),
-		viper.GetString("database.password"),
-		viper.GetString("database.wa_dbname"),
-		viper.GetString("database.sslmode"))
-	container, err := sqlstore.New("postgres", connStr, dbLog)
+	db.Get(&whatsappID, sql, args...)
+
+	if whatsappID != "" {
+		// check DB and clear if data exists, supaya tidak error
+		waTables, err := getAllTables(dbWA)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to get all tables"})
+		}
+
+		for _, watbl := range waTables {
+			sql, args, err := goqu.Delete(watbl).Where(goqu.Or(goqu.Ex{"jid": whatsappID}, goqu.Ex{"our_jid": whatsappID})).ToSQL()
+			if err != nil {
+				return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to build SQL query for clearing data"})
+			}
+
+			db.Exec(sql, args...)
+		}
+	}
+
+	dbLog := waLog.Stdout("Database", "DEBUG", true)
+	container, err := sqlstore.New("postgres", connStringWA, dbLog)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to create session store"})
 	}
@@ -209,6 +273,20 @@ func WhatsAppLogin(c echo.Context) error {
 	qrChan, _ := client.GetQRChannel(context.Background())
 	client.Connect()
 
+	// Save client.Store.ID to users.whatsapp_id
+	sql, args, err = goqu.Update("users").
+		Set(goqu.Record{"whatsapp_id": client.Store.ID}).
+		Where(goqu.Ex{"username": username}).
+		ToSQL()
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to build SQL query"})
+	}
+
+	_, err = db.Exec(sql, args...)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to update WhatsApp ID"})
+	}
+
 	for evt := range qrChan {
 		if evt.Event == "code" {
 			code := evt.Code
@@ -218,6 +296,17 @@ func WhatsAppLogin(c echo.Context) error {
 	}
 
 	return nil
+}
+
+func CheckWhatsAppID(c echo.Context) error {
+	username := c.Get("username").(string)
+
+	client, exists := clientMap[username]
+	if !exists {
+		return c.JSON(http.StatusUnauthorized, echo.Map{"error": "WhatsApp not logged in"})
+	}
+
+	return c.JSON(http.StatusOK, echo.Map{"whatsapp_id": client.Store.ID})
 }
 
 // SendBlastMessage sends a message to multiple WhatsApp numbers
@@ -252,6 +341,25 @@ func SendBlastMessage(c echo.Context) error {
 	return c.JSON(http.StatusOK, echo.Map{"message": "Messages sent"})
 }
 
+func WhatsAppLogout(c echo.Context) error {
+	username := c.Get("username").(string)
+
+	clientLock.Lock()
+	defer clientLock.Unlock()
+
+	client, exists := clientMap[username]
+	if !exists {
+		return c.JSON(http.StatusUnauthorized, echo.Map{"error": "WhatsApp not logged in"})
+	}
+
+	client.Disconnect()
+	delete(clientMap, username)
+
+	// TODO: clear DB data based on JID
+
+	return c.JSON(http.StatusOK, echo.Map{"message": "Logged out successfully"})
+}
+
 func jwtMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		authHeader := c.Request().Header.Get("Authorization")
@@ -274,5 +382,40 @@ func jwtMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 		c.Set("username", claims.Username)
 
 		return next(c)
+	}
+}
+
+func getAllTables(db *sqlx.DB) ([]string, error) {
+	var tables []string
+
+	dialect := goqu.Dialect("postgres") // Change dialect if needed
+	query, _, err := dialect.Select("table_name").
+		From("information_schema.tables").
+		Where(goqu.Ex{"table_schema": "public"}). // Adjust schema if necessary
+		ToSQL()
+	if err != nil {
+		return nil, err
+	}
+
+	err = db.Select(&tables, query)
+	if err != nil {
+		return nil, err
+	}
+
+	return tables, nil
+}
+
+func exitHandler() {
+	tables, err := getAllTables(dbWA)
+	if err != nil {
+		log.Printf("Error getting tables: %v", err)
+		return
+	}
+
+	for _, table := range tables {
+		_, err := dbWA.Exec(fmt.Sprintf("DELETE FROM %s", table))
+		if err != nil {
+			log.Printf("Error clearing table %s: %v", table, err)
+		}
 	}
 }

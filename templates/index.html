@@ -94,11 +94,62 @@
             });
         }
 
+        function handleCheckWhatsAppID(event) {
+            event.preventDefault();
+
+            const jwtToken = localStorage.getItem('jwtToken');
+
+            fetch('/wa/check', {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${jwtToken}`
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else if (data.whatsapp_id) {
+                    // displayQRCode(data.qr);
+                    const waIDContainer = document.getElementById('wa-id');
+                    waIDContainer.innerHTML = data.whatsapp_id; // Clear previous QR code
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });
+        }
+
         function displayQRCode(qrCode) {
             const qrContainer = document.getElementById('qr-container');
             qrContainer.innerHTML = ''; // Clear previous QR code
             new QRCode(qrContainer, qrCode);
         }
+        
+        function handleWhatsAppLogout(event) {
+            event.preventDefault();
+
+            const jwtToken = localStorage.getItem('jwtToken');
+
+            fetch('/wa/logout', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${jwtToken}`
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else {
+                    alert('Logged out successfully');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });
+        }
+
     </script>
 </head>
 <body>
@@ -122,11 +173,22 @@
     </form>
     <div id="qr-container"></div>
 
+    <h1>WhatsApp Check ID</h1>
+    <form onsubmit="handleCheckWhatsAppID(event)">
+        <button type="submit">WhatsApp Check ID</button>
+    </form>
+    <div id="wa-id"></div>
+
     <h1>Send WhatsApp Message</h1>
     <form onsubmit="handleFormSubmit(event, '/wa/blast/user')">
         Numbers (comma-separated): <input type="text" name="numbers" /><br>
         Message: <input type="text" name="message" /><br>
         <button type="submit">Send</button>
+    </form>
+
+    <h1>Logout WhatsApp</h1>
+    <form onsubmit="handleWhatsAppLogout(event)">
+        <button type="submit">Logout from WhatsApp</button>
     </form>
 </body>
 </html>
