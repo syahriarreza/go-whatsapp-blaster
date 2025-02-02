@@ -17,11 +17,14 @@ import (
 	_ "github.com/lib/pq" // Import driver PostgreSQL
 	"github.com/sebarcode/codekit"
 	"github.com/spf13/viper"
+	"github.com/syahriarreza/go-whatsapp-blaster/helper"
+	"github.com/syahriarreza/go-whatsapp-blaster/middleware"
 	"github.com/syahriarreza/go-whatsapp-blaster/models"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/protobuf/proto"
@@ -38,13 +41,6 @@ var dbWA *sqlx.DB
 var clientMap = make(map[string]*whatsmeow.Client)
 var clientLock sync.Mutex
 var connStringWA string
-
-var jwtKey = []byte("your_secret_key")
-
-type Claims struct {
-	Username string `json:"username"`
-	jwt.RegisteredClaims
-}
 
 func init() {
 	// Setup Viper untuk membaca konfigurasi
@@ -136,10 +132,10 @@ func main() {
 	e.POST("/register", RegisterUser)
 	e.POST("/login", LoginUser)
 
-	e.GET("/wa/login", WhatsAppLogin, jwtMiddleware)
-	e.POST("/wa/logout", WhatsAppLogout, jwtMiddleware)
-	e.GET("/wa/check", CheckWhatsAppID, jwtMiddleware)
-	e.POST("/wa/blast/:username", SendBlastMessage, jwtMiddleware)
+	e.GET("/wa/login", WhatsAppLogin, middleware.JwtMiddleware)
+	e.POST("/wa/logout", WhatsAppLogout, middleware.JwtMiddleware)
+	e.GET("/wa/check", CheckWhatsAppID, middleware.JwtMiddleware)
+	e.POST("/wa/blast/:username", SendBlastMessage, middleware.JwtMiddleware)
 
 	// Tambahkan defer untuk memanggil exitHandler ketika aplikasi mati
 	defer exitHandler()
@@ -198,7 +194,7 @@ func LoginUser(c echo.Context) error {
 	}
 
 	expirationTime := time.Now().Add(5 * time.Minute)
-	claims := &Claims{
+	claims := &middleware.Claims{
 		Username: username,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expirationTime),
@@ -206,7 +202,7 @@ func LoginUser(c echo.Context) error {
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenString, err := token.SignedString(jwtKey)
+	tokenString, err := token.SignedString(middleware.JwtKey)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Could not generate token"})
 	}
@@ -227,33 +223,18 @@ func WhatsAppLogin(c echo.Context) error {
 		return c.JSON(http.StatusConflict, echo.Map{"error": "No Need to Login, Client already exists"})
 	}
 
-	// Get whatsapp_id from users table based on username
-	var whatsappID string
-	sql, args, err := goqu.From("users").
-		Select("whatsapp_id").
-		Where(goqu.Ex{"username": username}).
-		ToSQL()
+	whatsappID, err := helper.GetWhatsappID(db, username)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to build SQL query"})
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to get WhatsApp ID"})
 	}
-
-	db.Get(&whatsappID, sql, args...)
 
 	if whatsappID != "" {
 		// check DB and clear if data exists, supaya tidak error
-		waTables, err := getAllTables(dbWA)
-		if err != nil {
-			return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to get all tables"})
+		if err := helper.ClearWAData(dbWA, username); err != nil {
+			return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to clear WhatsApp data"})
 		}
 
-		for _, watbl := range waTables {
-			sql, args, err := goqu.Delete(watbl).Where(goqu.Or(goqu.Ex{"jid": whatsappID}, goqu.Ex{"our_jid": whatsappID})).ToSQL()
-			if err != nil {
-				return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to build SQL query for clearing data"})
-			}
-
-			db.Exec(sql, args...)
-		}
+		// TODO: clear whatsapp_id in users table
 	}
 
 	dbLog := waLog.Stdout("Database", "DEBUG", true)
@@ -270,11 +251,37 @@ func WhatsAppLogin(c echo.Context) error {
 	client := whatsmeow.NewClient(device, dbLog)
 	clientMap[username] = client
 
-	qrChan, _ := client.GetQRChannel(context.Background())
-	client.Connect()
+	client.AddEventHandler(func(evt interface{}) {
+		fmt.Printf("\n\n Received an event! %+v\n\n", evt)
+		switch v := evt.(type) {
+		case *events.Message:
+			fmt.Printf("\n\n Message: %+v\nv.Info.Chat:%s\n\n", v.Message, codekit.JsonStringIndent(v.Info.Chat, "\t"))
+			if *v.Message.ExtendedTextMessage.Text == "ping" {
+				client.SendMessage(context.Background(), v.Info.Chat, &waE2E.Message{
+					Conversation: proto.String("pong"),
+				})
+			}
+		// case *events.Receipt:
+		// 	fmt.Printf("\n\n Received a Receipt! %+v\n\n", v)
+		case *events.ConnectFailure:
+			fmt.Printf("\n\n Received a ConnectFailure! %+v\n\n", v)
+		case *events.Disconnected:
+			fmt.Printf("\n\n Received a Disconnected! %+v\n\n", v)
+		case *events.Picture:
+			fmt.Printf("\n\n Received a Picture! %+v\n\n", v)
+		case *events.Presence:
+			fmt.Printf("\n\n Received a Presence! %+v\n\n", v)
+		}
+	})
 
-	// Save client.Store.ID to users.whatsapp_id
-	sql, args, err = goqu.Update("users").
+	qrChan, _ := client.GetQRChannel(context.Background())
+
+	fmt.Println("WA connecting...")
+	client.Connect()
+	fmt.Println("WA Connected!")
+
+	// Save client.Store.ID to users.whatsapp_id // TODO: not updating
+	sql, args, err := goqu.Update("users").
 		Set(goqu.Record{"whatsapp_id": client.Store.ID}).
 		Where(goqu.Ex{"username": username}).
 		ToSQL()
@@ -287,6 +294,7 @@ func WhatsAppLogin(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to update WhatsApp ID"})
 	}
 
+	fmt.Println("WA Start Looping QR Channel. . .")
 	for evt := range qrChan {
 		if evt.Event == "code" {
 			code := evt.Code
@@ -305,6 +313,8 @@ func CheckWhatsAppID(c echo.Context) error {
 	if !exists {
 		return c.JSON(http.StatusUnauthorized, echo.Map{"error": "WhatsApp not logged in"})
 	}
+
+	fmt.Printf("\n\nClient ID: %s\n", codekit.JsonStringIndent(client.Store.ID, "\t"))
 
 	return c.JSON(http.StatusOK, echo.Map{"whatsapp_id": client.Store.ID})
 }
@@ -325,17 +335,20 @@ func SendBlastMessage(c echo.Context) error {
 	message := c.FormValue("message")
 
 	for _, number := range numbers {
-		toJID, e := types.ParseJID(number)
-		if e != nil {
-			return c.JSON(http.StatusUnauthorized, echo.Map{"error": e.Error()})
-		}
+		toJID := types.NewJID(number, types.DefaultUserServer)
+		// toJID, e := types.ParseJID(fmt.Sprintf("%s@%s", number, types.DefaultUserServer))
+		// if e != nil {
+		// 	return c.JSON(http.StatusUnauthorized, echo.Map{"error": e.Error()})
+		// }
+		fmt.Println("toJID:", toJID)
+
 		resp, e := client.SendMessage(context.TODO(), toJID, &waE2E.Message{
 			Conversation: proto.String(message),
 		})
 		if e != nil {
 			return c.JSON(http.StatusInternalServerError, echo.Map{"error": e.Error()})
 		}
-		fmt.Println("WA SengMessage:", codekit.JsonStringIndent(resp, "\t"))
+		fmt.Println("WA SendMessage:", codekit.JsonStringIndent(resp, "\t"))
 	}
 
 	return c.JSON(http.StatusOK, echo.Map{"message": "Messages sent"})
@@ -360,62 +373,6 @@ func WhatsAppLogout(c echo.Context) error {
 	return c.JSON(http.StatusOK, echo.Map{"message": "Logged out successfully"})
 }
 
-func jwtMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		authHeader := c.Request().Header.Get("Authorization")
-		if authHeader == "" {
-			return c.JSON(http.StatusUnauthorized, echo.Map{"error": "Missing token"})
-		}
-
-		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
-		claims := &Claims{}
-
-		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
-			return jwtKey, nil
-		})
-
-		if err != nil || !token.Valid {
-			return c.JSON(http.StatusUnauthorized, echo.Map{"error": "Invalid token"})
-		}
-
-		// Set username in context
-		c.Set("username", claims.Username)
-
-		return next(c)
-	}
-}
-
-func getAllTables(db *sqlx.DB) ([]string, error) {
-	var tables []string
-
-	dialect := goqu.Dialect("postgres") // Change dialect if needed
-	query, _, err := dialect.Select("table_name").
-		From("information_schema.tables").
-		Where(goqu.Ex{"table_schema": "public"}). // Adjust schema if necessary
-		ToSQL()
-	if err != nil {
-		return nil, err
-	}
-
-	err = db.Select(&tables, query)
-	if err != nil {
-		return nil, err
-	}
-
-	return tables, nil
-}
-
 func exitHandler() {
-	tables, err := getAllTables(dbWA)
-	if err != nil {
-		log.Printf("Error getting tables: %v", err)
-		return
-	}
-
-	for _, table := range tables {
-		_, err := dbWA.Exec(fmt.Sprintf("DELETE FROM %s", table))
-		if err != nil {
-			log.Printf("Error clearing table %s: %v", table, err)
-		}
-	}
+	helper.ClearWAData(dbWA)
 }

@@ -10,7 +10,6 @@ require (
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/labstack/echo/v4 v4.13.3
 	github.com/lib/pq v1.10.9
-	github.com/samber/lo v1.47.0
 	github.com/sebarcode/codekit v0.1.8
 	github.com/spf13/viper v1.19.0
 	go.mau.fi/whatsmeow v0.0.0-20250104105216-918c879fcd19
