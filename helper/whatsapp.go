@@ -45,7 +45,7 @@ func GetAllTables(db *sqlx.DB) ([]string, error) {
 	return tables, nil
 }
 
-func ClearWAData(dbWA *sqlx.DB, username ...string) error {
+func ClearWAData(dbWA *sqlx.DB, whatsappID ...string) error {
 	tables, err := GetAllTables(dbWA)
 	if err != nil {
 		log.Printf("Error getting tables: %v", err)
@@ -53,14 +53,8 @@ func ClearWAData(dbWA *sqlx.DB, username ...string) error {
 	}
 
 	for _, table := range tables {
-		if len(username) > 0 && username[0] != "" {
-			// Clear only the tables related to the username
-			whatsappID, err := GetWhatsappID(dbWA, username[0])
-			if err != nil {
-				log.Printf("Error getting WhatsApp ID for username %s: %v", username[0], err)
-				return err
-			}
-
+		if len(whatsappID) > 0 && whatsappID[0] != "" {
+			// Clear only the tables related to the whatsappID
 			sql, args, err := goqu.Delete(table).Where(goqu.Or(goqu.Ex{"jid": whatsappID}, goqu.Ex{"our_jid": whatsappID})).ToSQL()
 			if err != nil {
 				return err

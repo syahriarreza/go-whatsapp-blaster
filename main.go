@@ -230,7 +230,7 @@ func WhatsAppLogin(c echo.Context) error {
 
 	if whatsappID != "" {
 		// check DB and clear if data exists, supaya tidak error
-		if err := helper.ClearWAData(dbWA, username); err != nil {
+		if err := helper.ClearWAData(dbWA, whatsappID); err != nil {
 			return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to clear WhatsApp data"})
 		}
 
@@ -368,7 +368,14 @@ func WhatsAppLogout(c echo.Context) error {
 	client.Disconnect()
 	delete(clientMap, username)
 
-	// TODO: clear DB data based on JID
+	whatsappID, err := helper.GetWhatsappID(db, username)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to get WhatsApp ID"})
+	}
+
+	if err := helper.ClearWAData(dbWA, whatsappID); err != nil {
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to clear WhatsApp data"})
+	}
 
 	return c.JSON(http.StatusOK, echo.Map{"message": "Logged out successfully"})
 }
