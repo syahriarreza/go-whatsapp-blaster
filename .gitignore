@@ -28,3 +28,4 @@ main
 
 # Direktori yang dihasilkan oleh Go
 /bin/
+.ignored/

@@ -223,11 +223,7 @@ func WhatsAppLogin(c echo.Context) error {
 		return c.JSON(http.StatusConflict, echo.Map{"error": "No Need to Login, Client already exists"})
 	}
 
-	whatsappID, err := helper.GetWhatsappID(db, username)
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to get WhatsApp ID"})
-	}
-
+	whatsappID, _ := helper.GetWhatsappID(db, username)
 	if whatsappID != "" {
 		// check DB and clear if data exists, supaya tidak error
 		if err := helper.ClearWAData(dbWA, whatsappID); err != nil {
@@ -251,18 +247,30 @@ func WhatsAppLogin(c echo.Context) error {
 	client := whatsmeow.NewClient(device, dbLog)
 	clientMap[username] = client
 
+	// initiate QR channel
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	qrChan, err := client.GetQRChannel(ctx)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to get QR channel"})
+	}
+
+	// wa client handler
 	client.AddEventHandler(func(evt interface{}) {
-		fmt.Printf("\n\n Received an event! %+v\n\n", evt)
+		// fmt.Printf("\n\n Received an event ::: %+v\n\n", evt)
 		switch v := evt.(type) {
 		case *events.Message:
-			fmt.Printf("\n\n Message: %+v\nv.Info.Chat:%s\n\n", v.Message, codekit.JsonStringIndent(v.Info.Chat, "\t"))
-			if *v.Message.ExtendedTextMessage.Text == "ping" {
-				client.SendMessage(context.Background(), v.Info.Chat, &waE2E.Message{
-					Conversation: proto.String("pong"),
-				})
+			if v != nil {
+				fmt.Printf("\n\n Message: %+v\nFROM: %s\n\n", v.Message, codekit.JsonStringIndent(v.Info.Chat, "\t"))
+				if *v.Message.ExtendedTextMessage.Text == "ping" {
+					client.SendMessage(context.Background(), v.Info.Chat, &waE2E.Message{
+						Conversation: proto.String("pong"),
+					})
+				}
 			}
-		// case *events.Receipt:
-		// 	fmt.Printf("\n\n Received a Receipt! %+v\n\n", v)
+		case *events.Receipt:
+			fmt.Printf("\n\n Received a Receipt! %+v\n\n", v)
 		case *events.ConnectFailure:
 			fmt.Printf("\n\n Received a ConnectFailure! %+v\n\n", v)
 		case *events.Disconnected:
@@ -271,10 +279,18 @@ func WhatsAppLogin(c echo.Context) error {
 			fmt.Printf("\n\n Received a Picture! %+v\n\n", v)
 		case *events.Presence:
 			fmt.Printf("\n\n Received a Presence! %+v\n\n", v)
+		case *events.Connected:
+			fmt.Printf("\n\n Received a Connected! %+v\n\n", v)
+			cancel() // Cancel context to close QR channel
+		case *events.QR:
+			fmt.Printf("\n\n Received a QR! %+v\n\n", v)
+		case *events.LoggedOut:
+			fmt.Printf("\n\n Received a LoggedOut! %+v\n\n", v)
+			cancel() // Cancel context to close QR channel
+		default:
+			fmt.Printf("\n\n Received an event of type %T\n\n", v)
 		}
 	})
-
-	qrChan, _ := client.GetQRChannel(context.Background())
 
 	fmt.Println("WA connecting...")
 	client.Connect()
@@ -295,11 +311,20 @@ func WhatsAppLogin(c echo.Context) error {
 	}
 
 	fmt.Println("WA Start Looping QR Channel. . .")
-	for evt := range qrChan {
-		if evt.Event == "code" {
-			code := evt.Code
-			// qrterminal.GenerateHalfBlock(code, qrterminal.L, os.Stdout) // display on terminal
-			return c.JSON(http.StatusOK, echo.Map{"qr": code})
+	for {
+		select {
+		case evt, ok := <-qrChan:
+			if !ok {
+				// Channel closed
+				return c.JSON(http.StatusOK, echo.Map{"qr": "Channel closed"})
+			}
+			if evt.Event == "code" {
+				code := evt.Code
+				return c.JSON(http.StatusOK, echo.Map{"qr": code})
+			}
+		case <-ctx.Done():
+			// Context cancelled or timeout
+			return c.JSON(http.StatusRequestTimeout, echo.Map{"error": "QR code generation timed out"})
 		}
 	}
 
