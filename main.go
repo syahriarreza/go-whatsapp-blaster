@@ -102,6 +102,12 @@ func init() {
 	`
 	db.MustExec(schema)
 
+	// Atur ulang urutan untuk kolom id
+	_, err = db.Exec("SELECT setval(pg_get_serial_sequence('users', 'id'), COALESCE(MAX(id), 1)) FROM users")
+	if err != nil {
+		log.Fatalf("Failed to reset sequence: %v", err)
+	}
+
 	// db conn for wa
 	connStringWA = fmt.Sprintf("user=%s password=%s dbname=%s sslmode=%s",
 		viper.GetString("database.username"),
