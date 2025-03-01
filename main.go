@@ -97,7 +97,7 @@ func init() {
 		id SERIAL PRIMARY KEY,
 		username TEXT UNIQUE NOT NULL,
 		password TEXT NOT NULL,
-		whatsapp_id TEXT UNIQUE NOT NULL
+		whatsapp_id TEXT
 	);
 	`
 	db.MustExec(schema)
