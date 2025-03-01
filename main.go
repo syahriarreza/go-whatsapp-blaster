@@ -102,11 +102,11 @@ func init() {
 	`
 	db.MustExec(schema)
 
-	// Atur ulang urutan untuk kolom id
-	_, err = db.Exec("SELECT setval(pg_get_serial_sequence('users', 'id'), COALESCE(MAX(id), 1)) FROM users")
-	if err != nil {
-		log.Fatalf("Failed to reset sequence: %v", err)
-	}
+	// // Atur ulang urutan untuk kolom id
+	// _, err = db.Exec("SELECT setval(pg_get_serial_sequence('users', 'id'), COALESCE(MAX(id), 1)) FROM users")
+	// if err != nil {
+	// 	log.Fatalf("Failed to reset sequence: %v", err)
+	// }
 
 	// db conn for wa
 	connStringWA = fmt.Sprintf("user=%s password=%s dbname=%s sslmode=%s",
@@ -162,20 +162,32 @@ func RegisterUser(c echo.Context) error {
 	password := c.FormValue("password")
 	hashedPassword, _ := HashPassword(password)
 
-	// TODO: check username tidak boleh sama
+	// Check if username already exists
+	var existingUser string
+	err := db.Get(&existingUser, "SELECT username FROM users WHERE username = $1", username)
+	if err == nil {
+		return c.JSON(http.StatusConflict, echo.Map{"error": "Username already exists"})
+	}
+
+	// Get the current maximum ID from the users table
+	var maxID int
+	err = db.Get(&maxID, "SELECT COALESCE(MAX(id), 0) FROM users")
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": fmt.Sprintf("Failed to get maximum ID: %s", err.Error())})
+	}
 
 	sql, args, err := goqu.Insert("users").
 		Rows(
-			models.User{Username: username, Password: hashedPassword},
+			models.User{ID: (maxID + 1), Username: username, Password: hashedPassword},
 		).
 		ToSQL()
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, echo.Map{"error": fmt.Sprintf("Failed to build SQL query:%s", err.Error())})
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": fmt.Sprintf("Failed to build SQL query: %s", err.Error())})
 	}
 
 	_, err = db.Exec(sql, args...)
 	if err != nil {
-		return c.JSON(http.StatusConflict, echo.Map{"error": fmt.Sprintf("Username already exists: %s", err.Error())})
+		return c.JSON(http.StatusConflict, echo.Map{"error": fmt.Sprintf("Failed to register user: %s", err.Error())})
 	}
 
 	return c.JSON(http.StatusOK, echo.Map{"message": "User registered successfully"})
