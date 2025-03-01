@@ -96,8 +96,8 @@ func init() {
 	CREATE TABLE IF NOT EXISTS users (
 		id SERIAL PRIMARY KEY,
 		username TEXT UNIQUE NOT NULL,
-		password TEXT NOT NULL
-		whatsapp_id TEXT,
+		password TEXT NOT NULL,
+		whatsapp_id TEXT UNIQUE NOT NULL
 	);
 	`
 	db.MustExec(schema)
