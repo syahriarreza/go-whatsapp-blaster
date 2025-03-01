@@ -163,12 +163,12 @@ func RegisterUser(c echo.Context) error {
 		).
 		ToSQL()
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to build SQL query"})
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": fmt.Sprintf("Failed to build SQL query:%s", err.Error())})
 	}
 
 	_, err = db.Exec(sql, args...)
 	if err != nil {
-		return c.JSON(http.StatusConflict, echo.Map{"error": "Username already exists"})
+		return c.JSON(http.StatusConflict, echo.Map{"error": fmt.Sprintf("Username already exists: %s", err.Error())})
 	}
 
 	return c.JSON(http.StatusOK, echo.Map{"message": "User registered successfully"})
